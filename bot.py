@@ -349,6 +349,13 @@ def info_root_kb():
     kb.adjust(1)
     return kb.as_markup()
 
+def info_back_kb():
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⬅️ Назад", callback_data="go:info")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 def info_action_kb():
     kb = InlineKeyboardBuilder()
 
@@ -386,16 +393,31 @@ async def safe_edit(cb: CallbackQuery, text: str, markup=None):
         else:
             raise
 
-def format_admin_payload(user: Message, context_title: str, service_key: Optional[str], user_text: str) -> str:
-    uname = f"@{user.from_user.username}" if user.from_user.username else "(без username)"
-    sk = f"\nФормат: {SERVICES[service_key].title} ({service_key})" if service_key else ""
+def format_admin_payload(
+    user,
+    context_title: str,
+    service_key: str | None,
+    user_text: str,
+):
+    # user може бути Message або User
+    if hasattr(user, "from_user"):
+        tg_user = user.from_user
+    else:
+        tg_user = user
+
+    uname = f"@{tg_user.username}" if tg_user.username else "(без username)"
+    name = tg_user.full_name
+    uid = tg_user.id
+
+    service_line = f"\nПослуга: {service_key}" if service_key else ""
+
     return (
-        "🆕 <b>Нова заявка</b>\n"
-        f"Контекст: {context_title}\n"
-        f"Від: <b>{user.from_user.full_name}</b> {uname}\n"
-        f"User ID: <code>{user.from_user.id}</code>"
-        f"{sk}\n\n"
-        f"<b>Текст:</b>\n{user_text}"
+        "🔔 **Нова заявка**\n\n"
+        f"👤 {name} {uname}\n"
+        f"🆔 ID: `{uid}`\n"
+        f"📌 {context_title}\n"
+        f"{service_line}\n\n"
+        f"💬 {user_text}"
     )
 
 
@@ -446,33 +468,28 @@ async def go_pay(cb: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "info:request")
 async def info_request(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(Flow.waiting_precontact)
-    await safe_edit(cb, INFO_BOOKING_CONFIRM_TEXT)
-
-
-    s = SERVICES[service_key]
+    await state.clear()
 
     text = (
-        "Ти перейдеш на сторінку безпечної оплати.\n"
-        "Після оплати я отримаю підтвердження і напишу тобі,\n"
-        "щоб узгодити зручний день і час 🤍"
+        "🗓 **Запис на консультацію**\n\n"
+        "Дякую 🤍\n"
+        "Я напишу тобі в особисті повідомлення,\n"
+        "щоб допомогти з вибором формату\n"
+        "та узгодити зручний день і час."
     )
 
-    kb = InlineKeyboardBuilder()
-    kb.add(
-        InlineKeyboardButton(
-            text="💳 Оплатити консультацію",
-            url=s.pay_url
-        )
-    )
-    kb.button(
-        text="⬅️ Назад",
-        callback_data=f"svc:{service_key}"
-    )
-    kb.adjust(1)
-
-    await safe_edit(cb, text, kb.as_markup())
+    await safe_edit(cb, text)
     await cb.answer()
+
+    # 🔔 ЗАЯВКА ТАНІ — ОДРАЗУ
+    if ADMIN_CHAT_ID and ADMIN_CHAT_ID != 0:
+        payload = format_admin_payload(
+            user=cb.from_user,
+            context_title="Запис з інформаційного розділу",
+            service_key=None,
+            user_text="Натиснула «Записатись на консультацію»",
+        )
+        await bot.send_message(ADMIN_CHAT_ID, payload)
 
 
 @dp.callback_query(F.data.startswith("precontact:"))
@@ -496,16 +513,21 @@ async def precontact(cb: CallbackQuery, state: FSMContext):
 @dp.message(Flow.waiting_precontact)
 async def got_precontact_message(message: Message, state: FSMContext):
     data = await state.get_data()
-    service_key = data.get("service_key")
 
-    # підтвердження клієнту
-    await message.answer("Дякую. Я отримала твій запит і напишу тобі у відповідь.")
+    service_key = data.get("service_key")  # може бути None
+    topic = data.get("info_topic", "Запит на консультацію")
 
-    # відправка Тані (якщо ADMIN_CHAT_ID заданий)
+    # відповідь користувачу
+    await message.answer(
+        "Дякую 🤍\n"
+        "Я отримала твій запит і напишу тобі у відповідь."
+    )
+
+    # відправка Тані
     if ADMIN_CHAT_ID and ADMIN_CHAT_ID != 0:
         payload = format_admin_payload(
             user=message,
-            context_title="Попередній контакт",
+            context_title=topic,
             service_key=service_key,
             user_text=message.text or "",
         )
@@ -540,16 +562,54 @@ async def info_pick(cb: CallbackQuery, state: FSMContext):
 
     elif topic == "hard":
         await state.set_state(Flow.waiting_info)
-        await safe_edit(cb, INFO_HARD_TEXT)
-
+        await safe_edit(cb, INFO_HARD_TEXT, info_back_kb())
+    
     elif topic == "other":
         await state.set_state(Flow.waiting_info)
-        await safe_edit(cb, INFO_OTHER_TEXT)
-
+        await safe_edit(cb, INFO_OTHER_TEXT, info_back_kb())
+    
     else:
         await cb.answer("Невідомий пункт", show_alert=True)
         return
 
+    await cb.answer()
+
+@dp.callback_query(F.data == "info:hard")
+async def info_hard(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(Flow.waiting_precontact)
+    await state.update_data(info_topic="Мені зараз складно визначитись")
+
+    text = (
+        "😥 **Мені зараз складно визначитись**\n\n"
+        "Це ок — не завжди рішення приходить одразу.\n\n"
+        "Можеш коротко описати, що з тобою відбувається\n"
+        "або що саме викликає сумніви.\n"
+        "Я відповім особисто."
+    )
+
+    await cb.message.edit_text(
+        text,
+        reply_markup=info_back_kb(),
+        parse_mode="Markdown"
+    )
+    await cb.answer()
+
+@dp.callback_query(F.data == "info:other")
+async def info_other(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(Flow.waiting_precontact)
+    await state.update_data(info_topic="Інше запитання")
+
+    text = (
+        "✍️ **Інше запитання**\n\n"
+        "Напиши, будь ласка, своє питання одним повідомленням.\n"
+        "Я відповім особисто."
+    )
+
+    await cb.message.edit_text(
+        text,
+        reply_markup=info_back_kb(),
+        parse_mode="Markdown"
+    )
     await cb.answer()
 
 
@@ -571,10 +631,6 @@ async def got_info_message(message: Message, state: FSMContext):
 
     await state.clear()
 
-@dp.message(Flow.waiting_precontact)
-async def contact_message(msg: Message, state: FSMContext):
-    await send_to_admin(msg)
-    await msg.answer(CONTACT_CONFIRM_TEXT)
 
 async def main():
     await dp.start_polling(bot)
